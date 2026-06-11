@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ICM-20948 Collector</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>ICM-20948 Collector</h1>
+        <p id="brokerLine">MQTT broker: --</p>
+      </div>
+      <div class="status-row">
+        <span id="mqttBadge" class="badge badge-warn">MQTT --</span>
+        <span id="deviceBadge" class="badge">Device --</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="metrics-grid" aria-label="Live metrics">
+        <article class="metric-panel">
+          <span class="metric-label">Samples</span>
+          <strong id="sampleCount">0</strong>
+        </article>
+        <article class="metric-panel">
+          <span class="metric-label">Last Sample</span>
+          <strong id="lastSample">--</strong>
+        </article>
+        <article class="metric-panel">
+          <span class="metric-label">Uptime</span>
+          <strong id="uptime">--</strong>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <section class="panel chart-panel" aria-label="Live chart">
+          <div class="panel-head">
+            <div>
+              <h2>Live Signal</h2>
+              <p id="chartRange">Waiting for samples</p>
+            </div>
+            <div class="field-controls" aria-label="Chart fields">
+              <label><input type="checkbox" value="acc" checked /> Acc</label>
+              <label><input type="checkbox" value="gyr" checked /> Gyr</label>
+            </div>
+          </div>
+          <canvas id="signalChart" width="1200" height="420"></canvas>
+          <div id="legend" class="legend"></div>
+        </section>
+
+        <aside class="panel latest-panel" aria-label="Latest values">
+          <div class="panel-head">
+            <h2>Latest Values</h2>
+          </div>
+          <dl class="value-list">
+            <div>
+              <dt>Accelerometer</dt>
+              <dd id="accValues">--</dd>
+            </div>
+            <div>
+              <dt>Gyroscope</dt>
+              <dd id="gyrValues">--</dd>
+            </div>
+            <div>
+              <dt>Collector Event</dt>
+              <dd id="collectorEvent">--</dd>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section class="panel table-panel" aria-label="Sample history">
+        <div class="panel-head">
+          <div>
+            <h2>Sample History</h2>
+            <p>Latest received records</p>
+          </div>
+          <button id="refreshButton" type="button" title="Refresh samples">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Received</th>
+                <th>Uptime</th>
+                <th>Acc mg</th>
+                <th>Gyr dps</th>
+              </tr>
+            </thead>
+            <tbody id="sampleRows">
+              <tr>
+                <td colspan="4">No samples yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

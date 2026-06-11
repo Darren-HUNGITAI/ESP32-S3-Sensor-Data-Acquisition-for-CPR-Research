@@ -57,7 +57,7 @@ is chip select. Leave `EDA`, `ECL`, `INT`, and `FSYNC` disconnected for this
 firmware.
 
 The ICM-20948 DMP is not enabled in this firmware. The device publishes raw
-accelerometer, gyroscope, magnetometer, and temperature samples.
+accelerometer and gyroscope samples.
 
 ## Setup Mode
 
@@ -121,6 +121,38 @@ will be applied again after restart.
 
 - `esp32s3/icm20948/status`: retained online/offline status
 - `esp32s3/icm20948/data`: JSON IMU samples, about one sample every 100 ms
+
+## Collector GUI Container
+
+This repo includes an optional collector and browser GUI in `collector_gui/`.
+It runs as one Docker container, subscribes to the existing Mosquitto broker at
+`host.docker.internal:1883`, stores samples in SQLite, and serves the GUI at:
+
+```text
+http://localhost:8080
+```
+
+Start the existing broker first:
+
+```powershell
+cd C:\Users\a0919\OneDrive\桌面\ICM-20948\local_mqtt_broker
+docker compose up -d
+```
+
+Then start the collector:
+
+```powershell
+cd C:\Users\a0919\OneDrive\桌面\ICM-20948\esp32s3_icm20948_mqtt_demo\collector_gui
+docker compose up --build
+```
+
+The collector exposes:
+
+- `GET /api/health`
+- `GET /api/samples?limit=500`
+- `GET /api/status`
+- `GET /api/summary`
+- `WebSocket /ws/live`
 
 ## Subscribe From Broker Folder
 

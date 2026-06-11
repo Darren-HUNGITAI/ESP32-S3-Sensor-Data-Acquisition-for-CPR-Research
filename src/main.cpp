@@ -627,25 +627,19 @@ static void publishImuSample()
 
   imu.getAGMT();
 
-  char payload[384];
+  char payload[256];
   snprintf(payload,
            sizeof(payload),
            "{\"uptime_ms\":%lu,"
            "\"acc_mg\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
-           "\"gyr_dps\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
-           "\"mag_uT\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
-           "\"temp_c\":%.2f}",
+           "\"gyr_dps\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
            static_cast<unsigned long>(nowMs),
            imu.accX(),
            imu.accY(),
            imu.accZ(),
            imu.gyrX(),
            imu.gyrY(),
-           imu.gyrZ(),
-           imu.magX(),
-           imu.magY(),
-           imu.magZ(),
-           imu.temp());
+           imu.gyrZ());
 
   bool ok = mqttClient.publish(MQTT_DATA_TOPIC, payload);
   Serial.println(ok ? payload : "MQTT publish failed");
