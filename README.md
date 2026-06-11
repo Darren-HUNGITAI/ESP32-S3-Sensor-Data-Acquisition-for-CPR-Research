@@ -1,6 +1,6 @@
 # ESP32-S3 ICM-20948 MQTT Demo
 
-This project reads the ICM-20948 over I2C and publishes JSON samples to MQTT.
+This project reads the ICM-20948 over SPI and publishes JSON samples to MQTT.
 
 Wi-Fi is managed by this firmware with up to 4 saved slots in ESP32 Preferences.
 MQTT settings are also stored in ESP32 Preferences.
@@ -31,7 +31,7 @@ boot. This is useful for preloading a demo venue Wi-Fi before arriving.
 
 ## Boot Flow
 
-1. Initialize ICM-20948 over I2C.
+1. Initialize ICM-20948 over SPI.
 2. Load MQTT settings from Preferences namespace `mqtt`.
 3. Load the 4 Wi-Fi slots from Preferences namespace `wifi_multi`.
 4. Apply non-empty Wi-Fi preload slots from `secrets.h`.
@@ -39,6 +39,25 @@ boot. This is useful for preloading a demo venue Wi-Fi before arriving.
 6. Try visible stored slots in priority order.
 7. Try non-visible stored slots once, so hidden SSIDs can still work.
 8. If Wi-Fi or MQTT settings are missing or Wi-Fi cannot connect, open setup mode.
+
+## ICM-20948 SPI Wiring
+
+| ESP32-S3 | ICM-20948 |
+| --- | --- |
+| GPIO10 | NCS |
+| GPIO11 | SDA |
+| GPIO12 | SCL |
+| GPIO13 | AD0 |
+| 3V3 | VCC |
+| GND | GND |
+
+On this 10-pin ICM-20948 module, the SPI signals share the I2C-labeled pins:
+`SCL` is SPI clock, `SDA` is SPI MOSI/SDI, `AD0` is SPI MISO/SDO, and `NCS`
+is chip select. Leave `EDA`, `ECL`, `INT`, and `FSYNC` disconnected for this
+firmware.
+
+The ICM-20948 DMP is not enabled in this firmware. The device publishes raw
+accelerometer, gyroscope, magnetometer, and temperature samples.
 
 ## Setup Mode
 

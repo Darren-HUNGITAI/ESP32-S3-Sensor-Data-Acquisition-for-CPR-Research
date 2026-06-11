@@ -5,7 +5,7 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
-#include <Wire.h>
+#include <SPI.h>
 
 #include "ICM_20948.h"
 #include "secrets.h"
@@ -45,12 +45,11 @@
 #define PRELOAD_WIFI_3_PASSWORD ""
 #endif
 
-static constexpr uint8_t I2C_SDA_PIN = 8;
-static constexpr uint8_t I2C_SCL_PIN = 9;
-static constexpr uint32_t I2C_CLOCK_HZ = 400000;
-
-static constexpr bool ICM_AD0_VAL = false; // AD0/SDO tied to GND => address 0x68
-static constexpr uint8_t ICM_EXPECTED_ADDR = 0x68;
+static constexpr uint8_t SPI_CS_PIN = 10;   // ICM-20948 NCS
+static constexpr uint8_t SPI_MOSI_PIN = 11; // ICM-20948 SDA in SPI mode
+static constexpr uint8_t SPI_SCLK_PIN = 12; // ICM-20948 SCL in SPI mode
+static constexpr uint8_t SPI_MISO_PIN = 13; // ICM-20948 AD0 in SPI mode
+static constexpr uint32_t SPI_CLOCK_HZ = 4000000;
 
 static constexpr uint8_t CONFIG_BUTTON_PIN = 0; // BOOT button on most ESP32-S3 dev boards
 static constexpr uint32_t CONFIG_BUTTON_HOLD_MS = 5000;
@@ -83,7 +82,7 @@ struct MqttConfig
   char tls[4] = "0";
 };
 
-ICM_20948_I2C imu;
+ICM_20948_SPI imu;
 WiFiClient plainClient;
 WiFiClientSecure secureClient;
 PubSubClient mqttClient(plainClient);
@@ -277,56 +276,13 @@ static void resetSavedConfig()
   ESP.restart();
 }
 
-static void printHexAddress(uint8_t address)
-{
-  Serial.print("0x");
-  if (address < 0x10)
-  {
-    Serial.print("0");
-  }
-  Serial.print(address, HEX);
-}
-
-static bool scanI2CBus()
-{
-  bool foundExpectedDevice = false;
-
-  Serial.println("Scanning I2C bus...");
-  for (uint8_t address = 1; address < 127; address++)
-  {
-    Wire.beginTransmission(address);
-    uint8_t error = Wire.endTransmission();
-
-    if (error == 0)
-    {
-      Serial.print("  Found device at ");
-      printHexAddress(address);
-      if (address == ICM_EXPECTED_ADDR)
-      {
-        Serial.print("  <- ICM-20948 expected address");
-        foundExpectedDevice = true;
-      }
-      Serial.println();
-    }
-  }
-
-  if (!foundExpectedDevice)
-  {
-    Serial.print("Did not find ICM-20948 at ");
-    printHexAddress(ICM_EXPECTED_ADDR);
-    Serial.println(". Check SDA/SCL, power, GND, AD0, and NCS wiring.");
-  }
-
-  return foundExpectedDevice;
-}
-
 static void initializeImu()
 {
-  Serial.println("Initializing ICM-20948...");
+  Serial.println("Initializing ICM-20948 over SPI...");
 
   while (true)
   {
-    imu.begin(Wire, ICM_AD0_VAL);
+    imu.begin(SPI_CS_PIN, SPI, SPI_CLOCK_HZ);
 
     Serial.print("  Status: ");
     Serial.println(imu.statusString());
@@ -727,16 +683,17 @@ void setup()
 
   Serial.println();
   Serial.println("ESP32-S3 N16R8 + ICM-20948 MQTT demo");
-  Serial.printf("SDA=GPIO%u, SCL=GPIO%u, expected IMU address=",
-                I2C_SDA_PIN,
-                I2C_SCL_PIN);
-  printHexAddress(ICM_EXPECTED_ADDR);
-  Serial.println();
+  Serial.printf("SPI CS=GPIO%u, MOSI=GPIO%u, SCLK=GPIO%u, MISO=GPIO%u, clock=%lu Hz\n",
+                SPI_CS_PIN,
+                SPI_MOSI_PIN,
+                SPI_SCLK_PIN,
+                SPI_MISO_PIN,
+                static_cast<unsigned long>(SPI_CLOCK_HZ));
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.setClock(I2C_CLOCK_HZ);
+  pinMode(SPI_CS_PIN, OUTPUT);
+  digitalWrite(SPI_CS_PIN, HIGH);
+  SPI.begin(SPI_SCLK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CS_PIN);
 
-  scanI2CBus();
   initializeImu();
 
   setupWifiAndConfigPortal();
