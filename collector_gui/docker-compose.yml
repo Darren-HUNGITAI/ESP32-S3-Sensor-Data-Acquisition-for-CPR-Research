@@ -1,0 +1,18 @@
+services:
+  collector-gui:
+    build: .
+    container_name: icm20948-collector-gui
+    restart: unless-stopped
+    environment:
+      MQTT_HOST: host.docker.internal
+      MQTT_PORT: "1883"
+      MQTT_TOPIC: esp32s3/icm20948/#
+      MQTT_CLIENT_ID: icm20948-collector-gui
+      SQLITE_PATH: /app/data/icm20948.sqlite
+    ports:
+      - "8080:8080"
+    volumes:
+      - icm20948_collector_data:/app/data
+
+volumes:
+  icm20948_collector_data:
