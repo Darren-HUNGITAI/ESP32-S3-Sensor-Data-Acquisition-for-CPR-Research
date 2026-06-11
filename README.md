@@ -57,7 +57,7 @@ is chip select. Leave `EDA`, `ECL`, `INT`, and `FSYNC` disconnected for this
 firmware.
 
 The ICM-20948 DMP is not enabled in this firmware. The device publishes raw
-accelerometer, gyroscope, magnetometer, and temperature samples.
+accelerometer and gyroscope samples.
 
 ## Setup Mode
 

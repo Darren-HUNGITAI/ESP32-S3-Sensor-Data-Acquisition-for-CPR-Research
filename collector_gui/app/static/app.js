@@ -17,12 +17,6 @@ const fields = {
     ["gyr_y_dps", "Gyr Y", "#287a3e"],
     ["gyr_z_dps", "Gyr Z", "#b3261e"],
   ],
-  mag: [
-    ["mag_x_uT", "Mag X", "#4b6f44"],
-    ["mag_y_uT", "Mag Y", "#8a5a00"],
-    ["mag_z_uT", "Mag Z", "#6f5cc2"],
-  ],
-  temp: [["temp_c", "Temp C", "#d45d00"]],
 };
 
 const els = {
@@ -31,14 +25,12 @@ const els = {
   deviceBadge: document.querySelector("#deviceBadge"),
   sampleCount: document.querySelector("#sampleCount"),
   lastSample: document.querySelector("#lastSample"),
-  temperature: document.querySelector("#temperature"),
   uptime: document.querySelector("#uptime"),
   chartRange: document.querySelector("#chartRange"),
   chart: document.querySelector("#signalChart"),
   legend: document.querySelector("#legend"),
   accValues: document.querySelector("#accValues"),
   gyrValues: document.querySelector("#gyrValues"),
-  magValues: document.querySelector("#magValues"),
   collectorEvent: document.querySelector("#collectorEvent"),
   sampleRows: document.querySelector("#sampleRows"),
   refreshButton: document.querySelector("#refreshButton"),
@@ -91,9 +83,7 @@ function normalizeSample(sample) {
   for (const key of Object.keys(normalized)) {
     if (
       key.endsWith("_mg") ||
-      key.endsWith("_dps") ||
-      key.endsWith("_uT") ||
-      key === "temp_c"
+      key.endsWith("_dps")
     ) {
       normalized[key] =
         normalized[key] === null || normalized[key] === undefined
@@ -175,13 +165,11 @@ function renderMetrics() {
   const latest = samples[samples.length - 1];
   els.sampleCount.textContent = String(totalSamples || samples.length);
   els.lastSample.textContent = latest ? formatTime(latest.received_at) : "--";
-  els.temperature.textContent = latest ? `${formatNumber(latest.temp_c)} C` : "--";
   els.uptime.textContent = latest ? formatUptime(latest.uptime_ms) : "--";
 
   if (latest) {
     els.accValues.textContent = vectorText(latest, "acc", "mg");
     els.gyrValues.textContent = vectorText(latest, "gyr", "dps");
-    els.magValues.textContent = vectorText(latest, "mag", "uT");
   }
 
   els.collectorEvent.textContent = latestEvent
@@ -210,7 +198,7 @@ function renderMetrics() {
 function renderTable() {
   const rows = samples.slice(-120).reverse();
   if (rows.length === 0) {
-    els.sampleRows.innerHTML = '<tr><td colspan="6">No samples yet.</td></tr>';
+    els.sampleRows.innerHTML = '<tr><td colspan="4">No samples yet.</td></tr>';
     return;
   }
 
@@ -222,8 +210,6 @@ function renderTable() {
           <td>${formatUptime(sample.uptime_ms)}</td>
           <td>${formatNumber(sample.acc_x_mg)}, ${formatNumber(sample.acc_y_mg)}, ${formatNumber(sample.acc_z_mg)}</td>
           <td>${formatNumber(sample.gyr_x_dps)}, ${formatNumber(sample.gyr_y_dps)}, ${formatNumber(sample.gyr_z_dps)}</td>
-          <td>${formatNumber(sample.mag_x_uT)}, ${formatNumber(sample.mag_y_uT)}, ${formatNumber(sample.mag_z_uT)}</td>
-          <td>${formatNumber(sample.temp_c)}</td>
         </tr>
       `,
     )

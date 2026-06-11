@@ -29,10 +29,6 @@
           <strong id="lastSample">--</strong>
         </article>
         <article class="metric-panel">
-          <span class="metric-label">Temperature</span>
-          <strong id="temperature">--</strong>
-        </article>
-        <article class="metric-panel">
           <span class="metric-label">Uptime</span>
           <strong id="uptime">--</strong>
         </article>
@@ -48,8 +44,6 @@
             <div class="field-controls" aria-label="Chart fields">
               <label><input type="checkbox" value="acc" checked /> Acc</label>
               <label><input type="checkbox" value="gyr" checked /> Gyr</label>
-              <label><input type="checkbox" value="mag" /> Mag</label>
-              <label><input type="checkbox" value="temp" /> Temp</label>
             </div>
           </div>
           <canvas id="signalChart" width="1200" height="420"></canvas>
@@ -68,10 +62,6 @@
             <div>
               <dt>Gyroscope</dt>
               <dd id="gyrValues">--</dd>
-            </div>
-            <div>
-              <dt>Magnetometer</dt>
-              <dd id="magValues">--</dd>
             </div>
             <div>
               <dt>Collector Event</dt>
@@ -97,13 +87,11 @@
                 <th>Uptime</th>
                 <th>Acc mg</th>
                 <th>Gyr dps</th>
-                <th>Mag uT</th>
-                <th>Temp C</th>
               </tr>
             </thead>
             <tbody id="sampleRows">
               <tr>
-                <td colspan="6">No samples yet.</td>
+                <td colspan="4">No samples yet.</td>
               </tr>
             </tbody>
           </table>

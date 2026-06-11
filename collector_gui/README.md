@@ -50,7 +50,7 @@ From this `collector_gui` folder, publish one valid sample through the Python
 dependencies already installed in the collector container:
 
 ```powershell
-docker compose exec collector-gui python -c "import json; import paho.mqtt.publish as publish; payload=json.dumps({'uptime_ms':12345,'acc_mg':{'x':1.0,'y':2.0,'z':3.0},'gyr_dps':{'x':0.1,'y':0.2,'z':0.3},'mag_uT':{'x':10.0,'y':11.0,'z':12.0},'temp_c':26.5}); publish.single('esp32s3/icm20948/data', payload=payload, hostname='host.docker.internal', port=1883)"
+docker compose exec collector-gui python -c "import json; import paho.mqtt.publish as publish; payload=json.dumps({'uptime_ms':12345,'acc_mg':{'x':1.0,'y':2.0,'z':3.0},'gyr_dps':{'x':0.1,'y':0.2,'z':0.3}}); publish.single('esp32s3/icm20948/data', payload=payload, hostname='host.docker.internal', port=1883)"
 ```
 
 Send device status:

@@ -13,6 +13,20 @@ def utc_now_iso() -> str:
 
 
 class Storage:
+    IMU_SAMPLE_COLUMNS = [
+        "id",
+        "received_at",
+        "topic",
+        "uptime_ms",
+        "acc_x_mg",
+        "acc_y_mg",
+        "acc_z_mg",
+        "gyr_x_dps",
+        "gyr_y_dps",
+        "gyr_z_dps",
+        "raw_json",
+    ]
+
     def __init__(self, sqlite_path: str) -> None:
         self.sqlite_path = sqlite_path
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
@@ -31,27 +45,6 @@ class Storage:
                 """
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
-
-                CREATE TABLE IF NOT EXISTS imu_samples (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    received_at TEXT NOT NULL,
-                    topic TEXT NOT NULL,
-                    uptime_ms INTEGER,
-                    acc_x_mg REAL,
-                    acc_y_mg REAL,
-                    acc_z_mg REAL,
-                    gyr_x_dps REAL,
-                    gyr_y_dps REAL,
-                    gyr_z_dps REAL,
-                    mag_x_uT REAL,
-                    mag_y_uT REAL,
-                    mag_z_uT REAL,
-                    temp_c REAL,
-                    raw_json TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_imu_samples_received_at
-                    ON imu_samples(received_at);
 
                 CREATE TABLE IF NOT EXISTS device_status (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +66,61 @@ class Storage:
                 );
                 """
             )
+            self._ensure_imu_samples_schema_locked()
+            self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_imu_samples_received_at
+                    ON imu_samples(received_at)
+                """
+            )
+
+    def _create_imu_samples_table_locked(self, table_name: str = "imu_samples") -> None:
+        self._connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                received_at TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                uptime_ms INTEGER,
+                acc_x_mg REAL,
+                acc_y_mg REAL,
+                acc_z_mg REAL,
+                gyr_x_dps REAL,
+                gyr_y_dps REAL,
+                gyr_z_dps REAL,
+                raw_json TEXT NOT NULL
+            )
+            """
+        )
+
+    def _ensure_imu_samples_schema_locked(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(imu_samples)").fetchall()
+        if not rows:
+            self._create_imu_samples_table_locked()
+            return
+
+        existing_columns = [row["name"] for row in rows]
+        if existing_columns == self.IMU_SAMPLE_COLUMNS:
+            return
+
+        self._connection.execute("DROP TABLE IF EXISTS imu_samples_new")
+        self._create_imu_samples_table_locked("imu_samples_new")
+
+        common_columns = [
+            column for column in self.IMU_SAMPLE_COLUMNS if column in existing_columns
+        ]
+        if common_columns:
+            column_sql = ", ".join(common_columns)
+            self._connection.execute(
+                f"""
+                INSERT INTO imu_samples_new ({column_sql})
+                SELECT {column_sql}
+                FROM imu_samples
+                """
+            )
+
+        self._connection.execute("DROP TABLE imu_samples")
+        self._connection.execute("ALTER TABLE imu_samples_new RENAME TO imu_samples")
 
     @staticmethod
     def _nested_float(payload: dict[str, Any], outer: str, inner: str) -> float | None:
@@ -96,15 +144,6 @@ class Storage:
         except (TypeError, ValueError):
             return None
 
-    @staticmethod
-    def _optional_float(value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     def insert_sample(self, topic: str, payload: dict[str, Any], raw_json: str) -> dict[str, Any]:
         received_at = utc_now_iso()
         values = {
@@ -117,10 +156,6 @@ class Storage:
             "gyr_x_dps": self._nested_float(payload, "gyr_dps", "x"),
             "gyr_y_dps": self._nested_float(payload, "gyr_dps", "y"),
             "gyr_z_dps": self._nested_float(payload, "gyr_dps", "z"),
-            "mag_x_uT": self._nested_float(payload, "mag_uT", "x"),
-            "mag_y_uT": self._nested_float(payload, "mag_uT", "y"),
-            "mag_z_uT": self._nested_float(payload, "mag_uT", "z"),
-            "temp_c": self._optional_float(payload.get("temp_c")),
             "raw_json": raw_json,
         }
 
@@ -131,14 +166,12 @@ class Storage:
                     received_at, topic, uptime_ms,
                     acc_x_mg, acc_y_mg, acc_z_mg,
                     gyr_x_dps, gyr_y_dps, gyr_z_dps,
-                    mag_x_uT, mag_y_uT, mag_z_uT,
-                    temp_c, raw_json
+                    raw_json
                 ) VALUES (
                     :received_at, :topic, :uptime_ms,
                     :acc_x_mg, :acc_y_mg, :acc_z_mg,
                     :gyr_x_dps, :gyr_y_dps, :gyr_z_dps,
-                    :mag_x_uT, :mag_y_uT, :mag_z_uT,
-                    :temp_c, :raw_json
+                    :raw_json
                 )
                 """,
                 values,
