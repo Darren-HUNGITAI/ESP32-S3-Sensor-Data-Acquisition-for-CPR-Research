@@ -1,44 +1,52 @@
-# ESP32-S3 ICM-20948 MQTT Demo
+# ESP32-S3 ICM-20948 Feasibility Logger
 
-This project reads the ICM-20948 over SPI and publishes JSON samples to MQTT.
+This project currently validates the A401 + MCP6002 pressure front end with the
+ESP32-S3 internal ADC and prints CSV samples over USB serial. The current
+feasibility phase intentionally does not use MQTT or a broker.
 
-Wi-Fi is managed by this firmware with up to 4 saved slots in ESP32 Preferences.
-MQTT settings are also stored in ESP32 Preferences.
+The PC side can display the serial stream with PlatformIO Serial Monitor. This
+keeps the first validation focused on sensor wiring, ADC stability, and whether
+pressing A401 produces a useful waveform.
 
-## Wi-Fi Storage Model
+An optional Wi-Fi UDP transport is available for the next experiment phase when
+the ESP32-S3 should stream low-latency waveform data directly to the local PC.
+It uses CSV packets by default, so the same variables can be captured through
+either serial or UDP.
 
-Wi-Fi credentials are stored in the ESP32 flash/NVS namespace `wifi_multi`:
+## Data Paths
+
+Current proof-of-concept path:
 
 ```text
-ssid0/pass0
-ssid1/pass1
-ssid2/pass2
-ssid3/pass3
+A401 -> MCP6002 analog front end -> ESP32-S3 internal ADC -> USB serial CSV
 ```
 
-Slot order is priority order. Slot 0 is tried first, then slot 1, slot 2, and
-slot 3.
+Optional low-latency wireless path:
 
-Optional preload values can be compiled into `include/secrets.h`:
-
-```cpp
-#define PRELOAD_WIFI_0_SSID "YOUR_PRIMARY_WIFI_SSID"
-#define PRELOAD_WIFI_0_PASSWORD "YOUR_PRIMARY_WIFI_PASSWORD"
+```text
+A401 -> MCP6002 analog front end -> ESP32-S3 internal ADC -> Wi-Fi UDP CSV
 ```
 
-Any non-empty `PRELOAD_WIFI_n_SSID` overwrites the matching Preferences slot on
-boot. This is useful for preloading a demo venue Wi-Fi before arriving.
+Default firmware output:
 
-## Boot Flow
+- Baud rate: `921600`
+- Sample interval: `10000 us`, about `100 Hz`
+- Format: CSV
+- Units: pressure ADC raw counts and millivolts
+- ICM-20948 output is temporarily disabled for pressure-circuit validation.
 
-1. Initialize ICM-20948 over SPI.
-2. Load MQTT settings from Preferences namespace `mqtt`.
-3. Load the 4 Wi-Fi slots from Preferences namespace `wifi_multi`.
-4. Apply non-empty Wi-Fi preload slots from `secrets.h`.
-5. Scan nearby Wi-Fi networks.
-6. Try visible stored slots in priority order.
-7. Try non-visible stored slots once, so hidden SSIDs can still work.
-8. If Wi-Fi or MQTT settings are missing or Wi-Fi cannot connect, open setup mode.
+CSV columns:
+
+```text
+uptime_ms
+pressure_vout_raw
+pressure_vout_mv
+pressure_vref_raw
+pressure_vref_mv
+pressure_delta_mv
+```
+
+Lines starting with `#` are status comments.
 
 ## ICM-20948 SPI Wiring
 
@@ -56,116 +64,138 @@ On this 10-pin ICM-20948 module, the SPI signals share the I2C-labeled pins:
 is chip select. Leave `EDA`, `ECL`, `INT`, and `FSYNC` disconnected for this
 firmware.
 
-The ICM-20948 DMP is not enabled in this firmware. The device publishes raw
+The ICM-20948 DMP is not enabled in this firmware. The device outputs raw
 accelerometer and gyroscope samples.
 
-## Setup Mode
+## A401 + MCP6002 Internal ADC Wiring
 
-The ESP32 starts an open access point:
+This wiring is the first bench validation path for the parts currently on hand.
+It uses the ESP32-S3 internal ADC instead of an external MCP3202.
 
-```text
-SSID: ICM20948-Setup
-Password: none
-```
+### MCP6002-I/P pinout
 
-Connect your phone or computer to it and open:
+| MCP6002 pin | Connection |
+| --- | --- |
+| 1 OUTA | `VREF_BUF`, also ESP32-S3 GPIO2 |
+| 2 -INA | pin 1 OUTA |
+| 3 +INA | resistor divider midpoint `VREF_RAW` |
+| 4 VSS | GND |
+| 5 +INB | `VREF_BUF` |
+| 6 -INB | A401 signal node and feedback resistor |
+| 7 OUTB | `VOUT_PRESSURE`, also ESP32-S3 GPIO1 |
+| 8 VDD | 3V3 |
 
-```text
-http://192.168.4.1
-```
+### VREF divider and pressure front end
 
-Open the parameters page and fill in:
+| Part | Connection |
+| --- | --- |
+| 47k resistor | 3V3 to `VREF_RAW` |
+| 10k resistor | `VREF_RAW` to GND |
+| 100nF capacitor | `VREF_RAW` to GND |
+| 100nF capacitor | MCP6002 pin 8 to GND, close to the IC |
+| A401 | MCP6002 pin 6 to GND |
+| 47k feedback resistor | MCP6002 pin 7 to pin 6 |
+| ESP32-S3 GPIO1 | MCP6002 pin 7 `VOUT_PRESSURE` |
+| ESP32-S3 GPIO2 | MCP6002 pin 1 `VREF_BUF` |
 
-```text
-Wi-Fi slot 0 SSID/password
-Wi-Fi slot 1 SSID/password
-Wi-Fi slot 2 SSID/password
-Wi-Fi slot 3 SSID/password
-MQTT host or IP
-MQTT port
-MQTT username
-MQTT password
-MQTT TLS? 0=no, 1=yes
-```
+With 47k over 10k, `VREF_RAW` is about `0.58 V` from a 3.3 V supply. The
+firmware reports both `pressure_vout_mv` and `pressure_vref_mv`; use
+`pressure_delta_mv` as the first pressure trend signal. Pressing A401 should
+make `pressure_vout_mv` and `pressure_delta_mv` increase.
 
-After saving, the ESP32 stores the values and restarts.
+## Build And Upload
 
-## Tailscale Funnel MQTT Demo
-
-For the current Funnel setup, use:
-
-```text
-MQTT host or IP: your *.ts.net Funnel hostname
-MQTT port: 10000
-MQTT TLS? 1
-```
-
-The MQTT connection is MQTT over TLS/TCP from the ESP32 to Tailscale Funnel.
-Funnel then forwards to the local Mosquitto broker.
-
-## Reset Settings
-
-While the firmware is running, hold the ESP32-S3 BOOT button for 5 seconds. The
-device clears:
-
-```text
-wifi_multi Preferences
-mqtt Preferences
-ESP32 core saved Wi-Fi settings
-```
-
-Then it restarts into setup mode. Non-empty Wi-Fi preload slots in `secrets.h`
-will be applied again after restart.
-
-## Topics
-
-- `esp32s3/icm20948/status`: retained online/offline status
-- `esp32s3/icm20948/data`: JSON IMU samples, about one sample every 100 ms
-
-## Collector GUI Container
-
-This repo includes an optional collector and browser GUI in `collector_gui/`.
-It runs as one Docker container, subscribes to the existing Mosquitto broker at
-`host.docker.internal:1883`, stores samples in SQLite, and serves the GUI at:
-
-```text
-http://localhost:8080
-```
-
-Start the existing broker first:
+Default USB serial firmware:
 
 ```powershell
-cd C:\Users\a0919\OneDrive\桌面\ICM-20948\local_mqtt_broker
-docker compose up -d
+platformio run -e esp32s3_n16r8
+platformio run -e esp32s3_n16r8 --target upload
 ```
 
-Then start the collector:
+Open the serial monitor at the same baud rate:
 
 ```powershell
-cd C:\Users\a0919\OneDrive\桌面\ICM-20948\esp32s3_icm20948_mqtt_demo\collector_gui
-docker compose up --build
+platformio device monitor --baud 921600
 ```
 
-The collector exposes:
+Watch `pressure_delta_mv`. Pressing A401 should make it increase.
 
-- `GET /api/health`
-- `GET /api/samples?limit=500`
-- `GET /api/status`
-- `GET /api/summary`
-- `WebSocket /ws/live`
+## Save Samples On The PC
 
-## Subscribe From Broker Folder
+The default firmware output is CSV and can be captured with these scripts.
+
+Install the Python serial dependency:
 
 ```powershell
-cd C:\Users\a0919\OneDrive\桌面\ICM-20948\local_mqtt_broker
-docker compose exec mosquitto mosquitto_sub -h localhost -t "esp32s3/icm20948/#" -v
+python -m pip install -r tools\requirements.txt
 ```
 
-## Notes
+List serial ports:
 
-- ESP32-S3 usually needs a 2.4 GHz Wi-Fi network. A `5G` SSID may fail if it is
-  truly 5 GHz only.
-- Wi-Fi and MQTT passwords are stored in ESP32 flash/NVS. This is acceptable for
-  a demo, but production hardware should consider flash encryption.
-- `MQTT TLS? 1` uses `WiFiClientSecure::setInsecure()`, so traffic is encrypted
-  but the server certificate is not verified.
+```powershell
+python tools\serial_to_csv.py --list-ports
+```
+
+Capture data, replacing `COM6` with the ESP32-S3 port:
+
+```powershell
+python tools\serial_to_csv.py --port COM6 --out data\trial_001.csv
+```
+
+Stop with `Ctrl+C`. The output CSV can then be opened in Excel, Python,
+MATLAB, or another analysis tool.
+
+## Optional Wi-Fi UDP Streaming
+
+Use this when the test needs the shortest practical direct-to-PC wireless
+latency and real-time waveform transfer without MQTT. UDP avoids broker and TCP
+retry latency.
+
+1. Copy `include/secrets.example.h` to `include/secrets.h`.
+2. Set `WIFI_SSID`, `WIFI_PASSWORD`, and `UDP_TARGET_IP` in `include/secrets.h`.
+   Use the PC IPv4 address from `ipconfig`.
+3. Start the PC receiver:
+
+```powershell
+python tools\udp_to_csv.py --port 5005 --out data\udp_trial_001.csv
+```
+
+4. Build and upload the UDP firmware:
+
+```powershell
+platformio run -e esp32s3_n16r8_udp
+platformio run -e esp32s3_n16r8_udp --target upload
+```
+
+If Windows Firewall prompts for Python UDP access, allow it on the local
+network used by the ESP32-S3 and PC.
+
+## Future Wireless Direction
+
+The professor's latest direction is to avoid MQTT during feasibility validation,
+but keep the architecture ready for a lower-latency wireless path that streams
+waveform data or transfers captured files to a local PC.
+
+Practical next candidates:
+
+1. USB serial logger for the current proof-of-concept.
+2. Wi-Fi UDP sender to a local PC for direct low-latency real-time waveform
+   streaming without extra hardware.
+3. Wi-Fi TCP sender if exact file delivery matters more than latency.
+4. ESP-NOW for very low ESP32-to-ESP32 latency, with a receiver ESP32 connected
+   to the PC over USB. A normal PC Wi-Fi adapter usually cannot receive ESP-NOW
+   frames directly.
+
+For the next stage, keep the sample names stable and swap only the transport:
+
+```text
+sample -> encode CSV/binary record -> transport -> PC viewer or file writer
+```
+
+This makes it possible to compare USB serial, Wi-Fi UDP/TCP, ESP-NOW, or any
+other candidate using the same pressure variables and timestamp measurements.
+
+## Legacy MQTT Files
+
+The `collector_gui/` folder is the previous MQTT-based collector and browser
+GUI. It is kept for reference, but it is not used by the current firmware path.

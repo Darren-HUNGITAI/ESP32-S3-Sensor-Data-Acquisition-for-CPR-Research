@@ -6,3 +6,6 @@ include/secrets.h
 collector_gui/data/
 collector_gui/**/*.pyc
 collector_gui/**/__pycache__/
+data/
+tools/**/*.pyc
+tools/**/__pycache__/
