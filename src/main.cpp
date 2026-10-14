@@ -1,710 +1,277 @@
 #include <Arduino.h>
-#include <Preferences.h>
-#include <PubSubClient.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
-#include <WiFiManager.h>
-#include <SPI.h>
+#include <string.h>
 
-#include "ICM_20948.h"
+#define SAMPLE_TRANSPORT_USB_SERIAL 1
+#define SAMPLE_TRANSPORT_WIFI_UDP 2
+
+#ifndef SAMPLE_TRANSPORT
+#define SAMPLE_TRANSPORT SAMPLE_TRANSPORT_USB_SERIAL
+#endif
+
+#if SAMPLE_TRANSPORT != SAMPLE_TRANSPORT_USB_SERIAL && SAMPLE_TRANSPORT != SAMPLE_TRANSPORT_WIFI_UDP
+#error "Unsupported SAMPLE_TRANSPORT. Use 1 for USB serial or 2 for Wi-Fi UDP."
+#endif
+
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+#if __has_include("secrets.h")
 #include "secrets.h"
+#endif
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
-#ifndef PRELOAD_WIFI_0_SSID
-#ifdef WIFI_SSID
-#define PRELOAD_WIFI_0_SSID WIFI_SSID
+#ifndef WIFI_SSID
+#ifdef PRELOAD_WIFI_0_SSID
+#define WIFI_SSID PRELOAD_WIFI_0_SSID
 #else
-#define PRELOAD_WIFI_0_SSID ""
+#define WIFI_SSID ""
 #endif
 #endif
 
-#ifndef PRELOAD_WIFI_0_PASSWORD
-#ifdef WIFI_PASSWORD
-#define PRELOAD_WIFI_0_PASSWORD WIFI_PASSWORD
+#ifndef WIFI_PASSWORD
+#ifdef PRELOAD_WIFI_0_PASSWORD
+#define WIFI_PASSWORD PRELOAD_WIFI_0_PASSWORD
 #else
-#define PRELOAD_WIFI_0_PASSWORD ""
+#define WIFI_PASSWORD ""
 #endif
 #endif
 
-#ifndef PRELOAD_WIFI_1_SSID
-#define PRELOAD_WIFI_1_SSID ""
-#endif
-#ifndef PRELOAD_WIFI_1_PASSWORD
-#define PRELOAD_WIFI_1_PASSWORD ""
-#endif
-#ifndef PRELOAD_WIFI_2_SSID
-#define PRELOAD_WIFI_2_SSID ""
-#endif
-#ifndef PRELOAD_WIFI_2_PASSWORD
-#define PRELOAD_WIFI_2_PASSWORD ""
-#endif
-#ifndef PRELOAD_WIFI_3_SSID
-#define PRELOAD_WIFI_3_SSID ""
-#endif
-#ifndef PRELOAD_WIFI_3_PASSWORD
-#define PRELOAD_WIFI_3_PASSWORD ""
+#ifndef UDP_TARGET_IP
+#define UDP_TARGET_IP ""
 #endif
 
-static constexpr uint8_t SPI_CS_PIN = 10;   // ICM-20948 NCS
-static constexpr uint8_t SPI_MOSI_PIN = 11; // ICM-20948 SDA in SPI mode
-static constexpr uint8_t SPI_SCLK_PIN = 12; // ICM-20948 SCL in SPI mode
-static constexpr uint8_t SPI_MISO_PIN = 13; // ICM-20948 AD0 in SPI mode
-static constexpr uint32_t SPI_CLOCK_HZ = 4000000;
+#ifndef UDP_TARGET_PORT
+#define UDP_TARGET_PORT 5005
+#endif
 
-static constexpr uint8_t CONFIG_BUTTON_PIN = 0; // BOOT button on most ESP32-S3 dev boards
-static constexpr uint32_t CONFIG_BUTTON_HOLD_MS = 5000;
-static constexpr uint32_t CONFIG_PORTAL_TIMEOUT_MS = 300000;
-static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
-static constexpr uint32_t MQTT_RETRY_MS = 3000;
-static constexpr uint32_t PUBLISH_INTERVAL_MS = 100;
+#ifndef UDP_LOCAL_PORT
+#define UDP_LOCAL_PORT 5006
+#endif
+#endif
 
-static constexpr size_t WIFI_SLOT_COUNT = 4;
-static constexpr size_t WIFI_SSID_LEN = 33;
-static constexpr size_t WIFI_PASS_LEN = 65;
+static constexpr uint8_t PRESSURE_VOUT_ADC_PIN = 1; // MCP6002-B OUTB
+static constexpr uint8_t PRESSURE_VREF_ADC_PIN = 2; // MCP6002-A OUTA
 
-static const char *CONFIG_AP_NAME = "ICM20948-Setup";
-static const char *CONFIG_AP_PASSWORD = nullptr; // Open AP for easier phone setup.
-static const char *MQTT_DATA_TOPIC = "esp32s3/icm20948/data";
-static const char *MQTT_STATUS_TOPIC = "esp32s3/icm20948/status";
+static constexpr uint32_t SERIAL_BAUD_RATE = 921600;
+static constexpr uint32_t SAMPLE_INTERVAL_US = 10000; // 100 Hz
+static constexpr size_t SERIAL_LINE_BUFFER_SIZE = 120;
+static const char *CSV_HEADER_LINE =
+    "uptime_ms,pressure_vout_raw,pressure_vout_mv,pressure_vref_raw,pressure_vref_mv,pressure_delta_mv";
 
-struct WifiCredential
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 2000;
+WiFiUDP udp;
+IPAddress udpTargetIp;
+static uint32_t lastWifiReconnectMs = 0;
+#endif
+
+static uint32_t lastSampleUs = 0;
+
+struct PressureSample
 {
-  char ssid[WIFI_SSID_LEN] = "";
-  char password[WIFI_PASS_LEN] = "";
+  uint32_t uptimeMs;
+  uint16_t pressureVoutRaw;
+  uint32_t pressureVoutMv;
+  uint16_t pressureVrefRaw;
+  uint32_t pressureVrefMv;
+  int32_t pressureDeltaMv;
 };
 
-struct MqttConfig
+static void initializePressureAdc()
 {
-  char host[96] = "";
-  char port[8] = "1883";
-  char username[64] = "";
-  char password[64] = "";
-  char tls[4] = "0";
-};
+  analogReadResolution(12);
+  analogSetPinAttenuation(PRESSURE_VOUT_ADC_PIN, ADC_11db);
+  analogSetPinAttenuation(PRESSURE_VREF_ADC_PIN, ADC_11db);
+  pinMode(PRESSURE_VOUT_ADC_PIN, INPUT);
+  pinMode(PRESSURE_VREF_ADC_PIN, INPUT);
 
-ICM_20948_SPI imu;
-WiFiClient plainClient;
-WiFiClientSecure secureClient;
-PubSubClient mqttClient(plainClient);
-WifiCredential wifiCredentials[WIFI_SLOT_COUNT];
-MqttConfig mqttConfig;
-
-static uint32_t lastMqttAttemptMs = 0;
-static uint32_t lastPublishMs = 0;
-static uint32_t configButtonPressedAtMs = 0;
-
-static const char *const PRELOAD_WIFI_SSIDS[WIFI_SLOT_COUNT] = {
-    PRELOAD_WIFI_0_SSID,
-    PRELOAD_WIFI_1_SSID,
-    PRELOAD_WIFI_2_SSID,
-    PRELOAD_WIFI_3_SSID,
-};
-
-static const char *const PRELOAD_WIFI_PASSWORDS[WIFI_SLOT_COUNT] = {
-    PRELOAD_WIFI_0_PASSWORD,
-    PRELOAD_WIFI_1_PASSWORD,
-    PRELOAD_WIFI_2_PASSWORD,
-    PRELOAD_WIFI_3_PASSWORD,
-};
-
-static void copyString(char *destination, size_t destinationSize, const String &source)
-{
-  snprintf(destination, destinationSize, "%s", source.c_str());
+  Serial.printf("# Pressure ADC Vout=GPIO%u, Vref=GPIO%u, resolution=12-bit\n",
+                PRESSURE_VOUT_ADC_PIN,
+                PRESSURE_VREF_ADC_PIN);
 }
 
-static void copyString(char *destination, size_t destinationSize, const char *source)
+static void haltWithMessage(const char *message)
 {
-  snprintf(destination, destinationSize, "%s", source == nullptr ? "" : source);
-}
-
-static bool isNonEmpty(const char *value)
-{
-  return value != nullptr && value[0] != '\0';
-}
-
-static bool mqttUsesTls()
-{
-  return mqttConfig.tls[0] == '1' || mqttConfig.tls[0] == 'y' || mqttConfig.tls[0] == 'Y';
-}
-
-static uint16_t mqttPort()
-{
-  char *end = nullptr;
-  unsigned long value = strtoul(mqttConfig.port, &end, 10);
-  if (end == mqttConfig.port || value == 0 || value > 65535)
-  {
-    return mqttUsesTls() ? 8883 : 1883;
-  }
-  return static_cast<uint16_t>(value);
-}
-
-static void loadMqttConfig()
-{
-  Preferences preferences;
-  preferences.begin("mqtt", false);
-  copyString(mqttConfig.host, sizeof(mqttConfig.host), preferences.getString("host", ""));
-  copyString(mqttConfig.port, sizeof(mqttConfig.port), preferences.getString("port", "1883"));
-  copyString(mqttConfig.username, sizeof(mqttConfig.username), preferences.getString("user", ""));
-  copyString(mqttConfig.password, sizeof(mqttConfig.password), preferences.getString("pass", ""));
-  copyString(mqttConfig.tls, sizeof(mqttConfig.tls), preferences.getString("tls", "0"));
-  preferences.end();
-}
-
-static void saveMqttConfig()
-{
-  Preferences preferences;
-  preferences.begin("mqtt", false);
-  preferences.putString("host", mqttConfig.host);
-  preferences.putString("port", mqttConfig.port);
-  preferences.putString("user", mqttConfig.username);
-  preferences.putString("pass", mqttConfig.password);
-  preferences.putString("tls", mqttConfig.tls);
-  preferences.end();
-}
-
-static void loadWifiCredentials()
-{
-  Preferences preferences;
-  preferences.begin("wifi_multi", false);
-  for (size_t index = 0; index < WIFI_SLOT_COUNT; index++)
-  {
-    char ssidKey[8];
-    char passKey[8];
-    snprintf(ssidKey, sizeof(ssidKey), "ssid%u", static_cast<unsigned int>(index));
-    snprintf(passKey, sizeof(passKey), "pass%u", static_cast<unsigned int>(index));
-
-    copyString(wifiCredentials[index].ssid,
-               sizeof(wifiCredentials[index].ssid),
-               preferences.getString(ssidKey, ""));
-    copyString(wifiCredentials[index].password,
-               sizeof(wifiCredentials[index].password),
-               preferences.getString(passKey, ""));
-  }
-  preferences.end();
-}
-
-static void saveWifiCredentials()
-{
-  Preferences preferences;
-  preferences.begin("wifi_multi", false);
-  for (size_t index = 0; index < WIFI_SLOT_COUNT; index++)
-  {
-    char ssidKey[8];
-    char passKey[8];
-    snprintf(ssidKey, sizeof(ssidKey), "ssid%u", static_cast<unsigned int>(index));
-    snprintf(passKey, sizeof(passKey), "pass%u", static_cast<unsigned int>(index));
-
-    preferences.putString(ssidKey, wifiCredentials[index].ssid);
-    preferences.putString(passKey, wifiCredentials[index].password);
-  }
-  preferences.end();
-}
-
-static void clearWifiCredentials()
-{
-  Preferences preferences;
-  preferences.begin("wifi_multi", false);
-  preferences.clear();
-  preferences.end();
-
-  for (size_t index = 0; index < WIFI_SLOT_COUNT; index++)
-  {
-    wifiCredentials[index].ssid[0] = '\0';
-    wifiCredentials[index].password[0] = '\0';
-  }
-}
-
-static bool hasAnyWifiCredential()
-{
-  for (size_t index = 0; index < WIFI_SLOT_COUNT; index++)
-  {
-    if (isNonEmpty(wifiCredentials[index].ssid))
-    {
-      return true;
-    }
-  }
-  return false;
-}
-
-static void applyPreloadedWifiCredentials()
-{
-  bool changed = false;
-
-  for (size_t index = 0; index < WIFI_SLOT_COUNT; index++)
-  {
-    if (!isNonEmpty(PRELOAD_WIFI_SSIDS[index]))
-    {
-      continue;
-    }
-
-    bool slotChanged = strcmp(wifiCredentials[index].ssid, PRELOAD_WIFI_SSIDS[index]) != 0 ||
-                       strcmp(wifiCredentials[index].password, PRELOAD_WIFI_PASSWORDS[index]) != 0;
-
-    copyString(wifiCredentials[index].ssid, sizeof(wifiCredentials[index].ssid), PRELOAD_WIFI_SSIDS[index]);
-    copyString(wifiCredentials[index].password, sizeof(wifiCredentials[index].password), PRELOAD_WIFI_PASSWORDS[index]);
-
-    Serial.printf("Preloaded Wi-Fi slot %u from secrets.h: %s\n",
-                  static_cast<unsigned int>(index),
-                  wifiCredentials[index].ssid);
-
-    changed = changed || slotChanged;
-  }
-
-  if (changed)
-  {
-    saveWifiCredentials();
-  }
-}
-
-static void resetSavedConfig()
-{
-  Serial.println("Resetting saved Wi-Fi and MQTT settings...");
-
-  clearWifiCredentials();
-
-  Preferences preferences;
-  preferences.begin("mqtt", false);
-  preferences.clear();
-  preferences.end();
-
-  WiFiManager wifiManager;
-  wifiManager.resetSettings();
-  WiFi.persistent(true);
-  WiFi.disconnect(true, true);
-  WiFi.persistent(false);
-  delay(500);
-  ESP.restart();
-}
-
-static void initializeImu()
-{
-  Serial.println("Initializing ICM-20948 over SPI...");
-
+  Serial.println(message);
   while (true)
   {
-    imu.begin(SPI_CS_PIN, SPI, SPI_CLOCK_HZ);
-
-    Serial.print("  Status: ");
-    Serial.println(imu.statusString());
-
-    if (imu.status == ICM_20948_Stat_Ok)
-    {
-      Serial.println("ICM-20948 initialized.");
-      return;
-    }
-
-    Serial.println("  Retrying in 500 ms...");
-    delay(500);
+    delay(1000);
   }
 }
 
-static bool connectToWifiSlot(size_t index)
+static void printStartupBanner()
 {
-  if (!isNonEmpty(wifiCredentials[index].ssid))
-  {
-    return false;
-  }
-
-  Serial.printf("Connecting to Wi-Fi slot %u: %s",
-                static_cast<unsigned int>(index),
-                wifiCredentials[index].ssid);
-
-  WiFi.disconnect(false, false);
-  delay(100);
-  WiFi.begin(wifiCredentials[index].ssid, wifiCredentials[index].password);
-
-  uint32_t startedAtMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAtMs < WIFI_CONNECT_TIMEOUT_MS)
-  {
-    Serial.print(".");
-    delay(500);
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.print("Wi-Fi connected. ESP32 IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.printf("Wi-Fi RSSI: %d dBm\n", WiFi.RSSI());
-    return true;
-  }
-
-  Serial.printf("Wi-Fi slot %u failed.\n", static_cast<unsigned int>(index));
-  WiFi.disconnect(false, false);
-  delay(200);
-  return false;
+  Serial.println("# ESP32-S3 N16R8 + A401/MCP6002 pressure validation logger");
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_USB_SERIAL
+  Serial.println("# Transport: USB serial CSV");
+#elif SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+  Serial.printf("# Transport: Wi-Fi UDP CSV -> %s:%u\n",
+                UDP_TARGET_IP,
+                static_cast<unsigned int>(UDP_TARGET_PORT));
+#endif
+  Serial.println("# Units: pressure ADC raw counts and millivolts");
+  Serial.println("# ICM-20948 output is temporarily disabled for pressure-circuit validation.");
+  Serial.printf("# CSV columns: %s\n", CSV_HEADER_LINE);
 }
 
-static bool connectToStoredWifi()
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+static void beginUdpTransport()
 {
-  if (!hasAnyWifiCredential())
+  if (strlen(WIFI_SSID) == 0)
   {
-    Serial.println("No stored Wi-Fi credentials.");
-    return false;
+    haltWithMessage("# Wi-Fi UDP transport requires WIFI_SSID in include/secrets.h.");
   }
 
-  bool visible[WIFI_SLOT_COUNT] = {};
-
-  Serial.println("Scanning Wi-Fi networks...");
-  int networkCount = WiFi.scanNetworks(false, true);
-  if (networkCount < 0)
+  if (strlen(UDP_TARGET_IP) == 0 || !udpTargetIp.fromString(UDP_TARGET_IP))
   {
-    Serial.println("Wi-Fi scan failed. Trying stored slots anyway.");
+    haltWithMessage("# Wi-Fi UDP transport requires UDP_TARGET_IP as the PC IPv4 address in include/secrets.h.");
   }
-  else
-  {
-    Serial.printf("Found %d Wi-Fi network(s).\n", networkCount);
-    for (int networkIndex = 0; networkIndex < networkCount; networkIndex++)
-    {
-      String scannedSsid = WiFi.SSID(networkIndex);
-      for (size_t slot = 0; slot < WIFI_SLOT_COUNT; slot++)
-      {
-        if (isNonEmpty(wifiCredentials[slot].ssid) && scannedSsid == wifiCredentials[slot].ssid)
-        {
-          visible[slot] = true;
-        }
-      }
-    }
-  }
-  WiFi.scanDelete();
-
-  for (size_t slot = 0; slot < WIFI_SLOT_COUNT; slot++)
-  {
-    if (visible[slot] && connectToWifiSlot(slot))
-    {
-      return true;
-    }
-  }
-
-  Serial.println("Trying stored Wi-Fi slots that were not visible in scan.");
-  for (size_t slot = 0; slot < WIFI_SLOT_COUNT; slot++)
-  {
-    if (!visible[slot] && connectToWifiSlot(slot))
-    {
-      return true;
-    }
-  }
-
-  Serial.println("Could not connect to any stored Wi-Fi.");
-  return false;
-}
-
-static void copyPortalValuesToConfig(WiFiManagerParameter *wifiSsidParams,
-                                     WiFiManagerParameter *wifiPassParams,
-                                     WiFiManagerParameter &mqttHostParam,
-                                     WiFiManagerParameter &mqttPortParam,
-                                     WiFiManagerParameter &mqttUserParam,
-                                     WiFiManagerParameter &mqttPassParam,
-                                     WiFiManagerParameter &mqttTlsParam)
-{
-  for (size_t slot = 0; slot < WIFI_SLOT_COUNT; slot++)
-  {
-    copyString(wifiCredentials[slot].ssid,
-               sizeof(wifiCredentials[slot].ssid),
-               wifiSsidParams[slot].getValue());
-    copyString(wifiCredentials[slot].password,
-               sizeof(wifiCredentials[slot].password),
-               wifiPassParams[slot].getValue());
-  }
-
-  copyString(mqttConfig.host, sizeof(mqttConfig.host), mqttHostParam.getValue());
-  copyString(mqttConfig.port, sizeof(mqttConfig.port), mqttPortParam.getValue());
-  copyString(mqttConfig.username, sizeof(mqttConfig.username), mqttUserParam.getValue());
-  copyString(mqttConfig.password, sizeof(mqttConfig.password), mqttPassParam.getValue());
-  copyString(mqttConfig.tls, sizeof(mqttConfig.tls), mqttTlsParam.getValue());
-}
-
-static void startConfigPortalAndRestart()
-{
-  Serial.println("Starting setup portal.");
-  Serial.printf("Connect to SSID \"%s\" and open http://192.168.4.1\n", CONFIG_AP_NAME);
-
-  bool portalSaved = false;
-
-  WiFiManager wifiManager;
-  wifiManager.setConfigPortalBlocking(false);
-  wifiManager.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT_MS / 1000);
-  wifiManager.setParamsPage(true);
-  wifiManager.setShowPassword(true);
-  wifiManager.setSaveParamsCallback([&portalSaved]() {
-    portalSaved = true;
-  });
-
-  const char *menu[] = {"param", "info", "exit"};
-  wifiManager.setMenu(menu, 3);
-
-  WiFiManagerParameter wifiHeader("<p><b>Wi-Fi slots (priority: 0 to 3)</b></p>");
-  WiFiManagerParameter wifiSsidParams[WIFI_SLOT_COUNT] = {
-      WiFiManagerParameter("wifi0_ssid", "Wi-Fi slot 0 SSID", wifiCredentials[0].ssid, sizeof(wifiCredentials[0].ssid)),
-      WiFiManagerParameter("wifi1_ssid", "Wi-Fi slot 1 SSID", wifiCredentials[1].ssid, sizeof(wifiCredentials[1].ssid)),
-      WiFiManagerParameter("wifi2_ssid", "Wi-Fi slot 2 SSID", wifiCredentials[2].ssid, sizeof(wifiCredentials[2].ssid)),
-      WiFiManagerParameter("wifi3_ssid", "Wi-Fi slot 3 SSID", wifiCredentials[3].ssid, sizeof(wifiCredentials[3].ssid)),
-  };
-  WiFiManagerParameter wifiPassParams[WIFI_SLOT_COUNT] = {
-      WiFiManagerParameter("wifi0_pass", "Wi-Fi slot 0 password", wifiCredentials[0].password, sizeof(wifiCredentials[0].password), "type=\"password\""),
-      WiFiManagerParameter("wifi1_pass", "Wi-Fi slot 1 password", wifiCredentials[1].password, sizeof(wifiCredentials[1].password), "type=\"password\""),
-      WiFiManagerParameter("wifi2_pass", "Wi-Fi slot 2 password", wifiCredentials[2].password, sizeof(wifiCredentials[2].password), "type=\"password\""),
-      WiFiManagerParameter("wifi3_pass", "Wi-Fi slot 3 password", wifiCredentials[3].password, sizeof(wifiCredentials[3].password), "type=\"password\""),
-  };
-
-  WiFiManagerParameter mqttHeader("<p><b>MQTT</b></p>");
-  WiFiManagerParameter mqttHostParam("mqtt_host", "MQTT host or IP", mqttConfig.host, sizeof(mqttConfig.host));
-  WiFiManagerParameter mqttPortParam("mqtt_port", "MQTT port", mqttConfig.port, sizeof(mqttConfig.port));
-  WiFiManagerParameter mqttUserParam("mqtt_user", "MQTT username", mqttConfig.username, sizeof(mqttConfig.username));
-  WiFiManagerParameter mqttPassParam("mqtt_pass", "MQTT password", mqttConfig.password, sizeof(mqttConfig.password), "type=\"password\"");
-  WiFiManagerParameter mqttTlsParam("mqtt_tls", "MQTT TLS? 0=no, 1=yes", mqttConfig.tls, sizeof(mqttConfig.tls));
-
-  wifiManager.addParameter(&wifiHeader);
-  for (size_t slot = 0; slot < WIFI_SLOT_COUNT; slot++)
-  {
-    wifiManager.addParameter(&wifiSsidParams[slot]);
-    wifiManager.addParameter(&wifiPassParams[slot]);
-  }
-  wifiManager.addParameter(&mqttHeader);
-  wifiManager.addParameter(&mqttHostParam);
-  wifiManager.addParameter(&mqttPortParam);
-  wifiManager.addParameter(&mqttUserParam);
-  wifiManager.addParameter(&mqttPassParam);
-  wifiManager.addParameter(&mqttTlsParam);
-
-  wifiManager.startConfigPortal(CONFIG_AP_NAME, CONFIG_AP_PASSWORD);
-
-  uint32_t startedAtMs = millis();
-  while (millis() - startedAtMs < CONFIG_PORTAL_TIMEOUT_MS)
-  {
-    wifiManager.process();
-
-    if (portalSaved)
-    {
-      copyPortalValuesToConfig(wifiSsidParams,
-                               wifiPassParams,
-                               mqttHostParam,
-                               mqttPortParam,
-                               mqttUserParam,
-                               mqttPassParam,
-                               mqttTlsParam);
-      saveWifiCredentials();
-      saveMqttConfig();
-
-      Serial.println("Saved Wi-Fi/MQTT settings. Restarting...");
-      wifiManager.stopConfigPortal();
-      delay(500);
-      ESP.restart();
-    }
-
-    delay(10);
-    yield();
-  }
-
-  Serial.println("Setup portal timed out. Restarting...");
-  wifiManager.stopConfigPortal();
-  delay(500);
-  ESP.restart();
-}
-
-static void setupWifiAndConfigPortal()
-{
-  loadMqttConfig();
-  loadWifiCredentials();
-  applyPreloadedWifiCredentials();
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  bool missingMqttHost = strlen(mqttConfig.host) == 0;
-  if (missingMqttHost)
+  Serial.print("# Connecting to configured Wi-Fi");
+  uint32_t startedAtMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAtMs < WIFI_CONNECT_TIMEOUT_MS)
   {
-    Serial.println("MQTT host is not configured.");
-    startConfigPortalAndRestart();
+    Serial.print(".");
+    delay(250);
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    haltWithMessage("# Wi-Fi connection failed. Check SSID/password and retry.");
   }
 
-  if (!connectToStoredWifi())
+  if (udp.begin(UDP_LOCAL_PORT) == 0)
   {
-    startConfigPortalAndRestart();
+    haltWithMessage("# UDP local socket failed to start.");
   }
 
-  Serial.printf("MQTT target: %s:%u, TLS=%s\n",
-                mqttConfig.host,
-                mqttPort(),
-                mqttUsesTls() ? "yes" : "no");
+  String localIp = WiFi.localIP().toString();
+  Serial.printf("# Wi-Fi connected. ESP32 IP=%s, RSSI=%d dBm\n", localIp.c_str(), WiFi.RSSI());
+  Serial.printf("# UDP sender ready. Target=%s:%u, local port=%u\n",
+                UDP_TARGET_IP,
+                static_cast<unsigned int>(UDP_TARGET_PORT),
+                static_cast<unsigned int>(UDP_LOCAL_PORT));
+}
+#endif
+
+static void beginSampleTransport()
+{
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+  beginUdpTransport();
+#endif
 }
 
-static void configureMqttClient()
+static void maintainSampleTransport()
 {
-  if (mqttUsesTls())
-  {
-    secureClient.setInsecure();
-    secureClient.setHandshakeTimeout(15);
-    mqttClient.setClient(secureClient);
-  }
-  else
-  {
-    mqttClient.setClient(plainClient);
-  }
-
-  mqttClient.setServer(mqttConfig.host, mqttPort());
-  mqttClient.setBufferSize(512);
-}
-
-static void makeMqttClientId(char *buffer, size_t bufferSize)
-{
-  uint64_t chipId = ESP.getEfuseMac();
-  snprintf(buffer,
-           bufferSize,
-           "esp32s3-icm20948-%04X%08X",
-           static_cast<uint16_t>(chipId >> 32),
-           static_cast<uint32_t>(chipId));
-}
-
-static void connectMqtt()
-{
-  if (mqttClient.connected() || strlen(mqttConfig.host) == 0)
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+  if (WiFi.status() == WL_CONNECTED)
   {
     return;
   }
 
   uint32_t nowMs = millis();
-  if (nowMs - lastMqttAttemptMs < MQTT_RETRY_MS)
+  if (nowMs - lastWifiReconnectMs < WIFI_RECONNECT_INTERVAL_MS)
   {
     return;
   }
-  lastMqttAttemptMs = nowMs;
 
-  char clientId[40];
-  makeMqttClientId(clientId, sizeof(clientId));
-
-  Serial.printf("Connecting to MQTT broker %s:%u as %s... ",
-                mqttConfig.host,
-                mqttPort(),
-                clientId);
-
-  bool connected = false;
-  if (strlen(mqttConfig.username) > 0)
-  {
-    connected = mqttClient.connect(clientId,
-                                   mqttConfig.username,
-                                   mqttConfig.password,
-                                   MQTT_STATUS_TOPIC,
-                                   0,
-                                   true,
-                                   "offline");
-  }
-  else
-  {
-    connected = mqttClient.connect(clientId,
-                                   MQTT_STATUS_TOPIC,
-                                   0,
-                                   true,
-                                   "offline");
-  }
-
-  if (connected)
-  {
-    Serial.println("connected");
-    mqttClient.publish(MQTT_STATUS_TOPIC, "online", true);
-  }
-  else
-  {
-    Serial.printf("failed, state=%d\n", mqttClient.state());
-  }
+  lastWifiReconnectMs = nowMs;
+  Serial.println("# Wi-Fi disconnected; reconnecting.");
+  WiFi.disconnect(false, false);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+#endif
 }
 
-static void publishImuSample()
+static void writeTransportLine(const char *line, size_t length)
 {
-  if (!mqttClient.connected() || !imu.dataReady())
+#if SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_USB_SERIAL
+  Serial.write(reinterpret_cast<const uint8_t *>(line), length);
+  Serial.write(static_cast<uint8_t>('\n'));
+#elif SAMPLE_TRANSPORT == SAMPLE_TRANSPORT_WIFI_UDP
+  if (WiFi.status() != WL_CONNECTED)
   {
     return;
   }
 
-  uint32_t nowMs = millis();
-  if (nowMs - lastPublishMs < PUBLISH_INTERVAL_MS)
-  {
-    return;
-  }
-  lastPublishMs = nowMs;
-
-  imu.getAGMT();
-
-  char payload[256];
-  snprintf(payload,
-           sizeof(payload),
-           "{\"uptime_ms\":%lu,"
-           "\"acc_mg\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
-           "\"gyr_dps\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-           static_cast<unsigned long>(nowMs),
-           imu.accX(),
-           imu.accY(),
-           imu.accZ(),
-           imu.gyrX(),
-           imu.gyrY(),
-           imu.gyrZ());
-
-  bool ok = mqttClient.publish(MQTT_DATA_TOPIC, payload);
-  Serial.println(ok ? payload : "MQTT publish failed");
+  udp.beginPacket(udpTargetIp, UDP_TARGET_PORT);
+  udp.write(reinterpret_cast<const uint8_t *>(line), length);
+  udp.write(static_cast<uint8_t>('\n'));
+  udp.endPacket();
+#endif
 }
 
-static void handleConfigButton()
+static void writeCsvHeader()
 {
-  bool pressed = digitalRead(CONFIG_BUTTON_PIN) == LOW;
+  writeTransportLine(CSV_HEADER_LINE, strlen(CSV_HEADER_LINE));
+}
 
-  if (!pressed)
+static bool readPressureSample(PressureSample &sample)
+{
+  uint32_t nowUs = micros();
+  if (nowUs - lastSampleUs < SAMPLE_INTERVAL_US)
   {
-    configButtonPressedAtMs = 0;
+    return false;
+  }
+  lastSampleUs = nowUs;
+
+  sample.uptimeMs = millis();
+  sample.pressureVoutRaw = analogRead(PRESSURE_VOUT_ADC_PIN);
+  sample.pressureVoutMv = analogReadMilliVolts(PRESSURE_VOUT_ADC_PIN);
+  sample.pressureVrefRaw = analogRead(PRESSURE_VREF_ADC_PIN);
+  sample.pressureVrefMv = analogReadMilliVolts(PRESSURE_VREF_ADC_PIN);
+  sample.pressureDeltaMv = static_cast<int32_t>(sample.pressureVoutMv) -
+                           static_cast<int32_t>(sample.pressureVrefMv);
+  return true;
+}
+
+static void writePressureSample(const PressureSample &sample)
+{
+  char line[SERIAL_LINE_BUFFER_SIZE];
+  int written = snprintf(line,
+                         sizeof(line),
+                         "%lu,%u,%lu,%u,%lu,%ld",
+                         static_cast<unsigned long>(sample.uptimeMs),
+                         sample.pressureVoutRaw,
+                         static_cast<unsigned long>(sample.pressureVoutMv),
+                         sample.pressureVrefRaw,
+                         static_cast<unsigned long>(sample.pressureVrefMv),
+                         static_cast<long>(sample.pressureDeltaMv));
+
+  if (written < 0 || static_cast<size_t>(written) >= sizeof(line))
+  {
+    Serial.println("# Dropped sample because the serial line buffer was too small.");
     return;
   }
 
-  if (configButtonPressedAtMs == 0)
-  {
-    configButtonPressedAtMs = millis();
-    Serial.println("Keep holding BOOT for 5 seconds to reset Wi-Fi/MQTT settings.");
-    return;
-  }
-
-  if (millis() - configButtonPressedAtMs >= CONFIG_BUTTON_HOLD_MS)
-  {
-    resetSavedConfig();
-  }
+  writeTransportLine(line, static_cast<size_t>(written));
 }
 
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD_RATE);
   delay(2000);
 
-  pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
-
   Serial.println();
-  Serial.println("ESP32-S3 N16R8 + ICM-20948 MQTT demo");
-  Serial.printf("SPI CS=GPIO%u, MOSI=GPIO%u, SCLK=GPIO%u, MISO=GPIO%u, clock=%lu Hz\n",
-                SPI_CS_PIN,
-                SPI_MOSI_PIN,
-                SPI_SCLK_PIN,
-                SPI_MISO_PIN,
-                static_cast<unsigned long>(SPI_CLOCK_HZ));
+  printStartupBanner();
 
-  pinMode(SPI_CS_PIN, OUTPUT);
-  digitalWrite(SPI_CS_PIN, HIGH);
-  SPI.begin(SPI_SCLK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CS_PIN);
-
-  initializeImu();
-
-  setupWifiAndConfigPortal();
-  configureMqttClient();
+  initializePressureAdc();
+  beginSampleTransport();
+  writeCsvHeader();
 }
 
 void loop()
 {
-  handleConfigButton();
+  maintainSampleTransport();
 
-  if (WiFi.status() != WL_CONNECTED)
+  PressureSample sample;
+  if (readPressureSample(sample))
   {
-    delay(500);
-    return;
+    writePressureSample(sample);
   }
-
-  connectMqtt();
-  mqttClient.loop();
-  publishImuSample();
 }

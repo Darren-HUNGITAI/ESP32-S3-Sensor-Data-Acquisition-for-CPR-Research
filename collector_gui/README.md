@@ -1,5 +1,9 @@
 # ICM-20948 Collector GUI
 
+Legacy note: this collector belongs to the previous MQTT-based prototype. The
+current firmware path uses USB serial CSV output and does not publish MQTT
+messages.
+
 This container subscribes to the existing Mosquitto broker, stores incoming
 ICM-20948 MQTT samples in SQLite, and serves a live browser GUI.
 
